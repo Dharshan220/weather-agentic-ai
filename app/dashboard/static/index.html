@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Weather Agent Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>🌤️ Autonomous Weather Monitoring Agent</h1>
+      <p class="subtitle">Open-Meteo data · Groq LLM · SMTP alerts · SQLite memory</p>
+    </div>
+    <div class="topbar-actions">
+      <span id="config-badge" class="badge badge-muted">loading…</span>
+      <button id="run-btn" class="btn btn-primary">▶ Run Agent Now</button>
+    </div>
+  </header>
+
+  <div id="run-status" class="run-status hidden"></div>
+
+  <main>
+    <section>
+      <div class="section-head">
+        <h2>📍 Locations &amp; Live Weather</h2>
+        <span class="legend">
+          <span class="chip chip-provider">Weather Provider · Open-Meteo</span>
+          <span class="chip chip-ai">AI · Groq LLM</span>
+        </span>
+      </div>
+      <div id="locations" class="grid"></div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>🧠 Agent Activity / Decision Trace</h2>
+        <div class="run-picker">
+          <label for="run-select">Run:</label>
+          <select id="run-select"></select>
+        </div>
+      </div>
+      <div id="trace"></div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>📧 Alert Log</h2>
+      </div>
+      <div id="alerts"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
