@@ -291,6 +291,7 @@ def run_daily_summary(triggered_by: str = "daily") -> None:
     try:
         locations = db.query(models.Location).all()
         sections = []
+        run = None
         for loc in locations:
             run = run_location(loc, triggered_by, db)
             snap = (
@@ -315,15 +316,17 @@ def run_daily_summary(triggered_by: str = "daily") -> None:
                 .all()
             )
             current = None
-            if snap and snap.summary_json:
+            if snap and snap.raw_json:
                 try:
-                    current = json.loads(snap.summary_json)
+                    parsed = json.loads(snap.raw_json)
                 except Exception:
-                    current = None
+                    parsed = None
+                if isinstance(parsed, dict):
+                    current = parsed.get("current")
             sections.append(
                 {
                     "location": loc.name,
-                    "current": current.get("current") if current else None,
+                    "current": current,
                     "analysis": analysis.summary if analysis else None,
                     "risks": [
                         {
@@ -342,17 +345,19 @@ def run_daily_summary(triggered_by: str = "daily") -> None:
         model_label = f"{cfg.llm_provider} · {cfg.llm_model}"
         msg = tools.email.build_daily_summary_email(sections, model_label)
         result = tools.email.send_email(msg["subject"], msg["text"], msg["html"])
-        db.add(
-            models.AlertLog(
-                location_id=locations[0].id if locations else 0,
-                risk_type="daily_summary",
-                severity="INFO",
-                decision_json=_json({"sections": len(sections)}),
-                sent_to=result.get("to", ""),
-                status=result.get("status", "logged"),
-                reason=result.get("reason", ""),
+        if run is not None:
+            db.add(
+                models.AlertLog(
+                    run_id=run.id,
+                    location_id=run.location_id,
+                    risk_type="daily_summary",
+                    severity="INFO",
+                    decision_json=_json({"sections": len(sections)}),
+                    sent_to=result.get("to", ""),
+                    status=result.get("status", "logged"),
+                    reason=result.get("reason", ""),
+                )
             )
-        )
         db.commit()
         print(f"[daily_summary] {result['status']}: {result['reason']}")
     finally:
