@@ -393,6 +393,34 @@ class LLMClientTest(unittest.TestCase):
             )
         self.assertEqual(len(captures["calls"]), 1)
 
+    def test_429_retries_then_succeeds(self):
+        captures = {}
+        with mock.patch.object(tools.llm.time, "sleep"):
+            out = self._run_chat(
+                "google",
+                [
+                    self.FakeResponse(429, "quota exceeded"),
+                    self.FakeResponse(200, "ok", {"choices": [{"message": {"content": "ok"}}]}),
+                ],
+                captures,
+            )
+        self.assertEqual(len(captures["calls"]), 2)
+        self.assertEqual(out, "ok")
+
+    def test_429_persistent_raises_llm_error(self):
+        captures = {}
+        with mock.patch.object(tools.llm.time, "sleep"), self.assertRaises(tools.llm.LLMError):
+            self._run_chat(
+                "google",
+                [
+                    self.FakeResponse(429, "quota exceeded"),
+                    self.FakeResponse(429, "quota exceeded"),
+                    self.FakeResponse(429, "quota exceeded"),
+                ],
+                captures,
+            )
+        self.assertEqual(len(captures["calls"]), 3)
+
 
 class DailySummaryTest(unittest.TestCase):
     """Exercise run_daily_summary against an isolated temp database."""

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Dict, List, Optional
 
 import httpx
@@ -83,19 +84,25 @@ class LLMClient:
             payload["temperature"] = self.temperature
         if json_mode and self.api_key and self.base_url.endswith("/openai/v1") and "groq" not in self.base_url:
             payload["response_format"] = {"type": "json_object"}
+        url = f"{self.base_url}/chat/completions"
         with httpx.Client(timeout=self.timeout) as client:
-            url = f"{self.base_url}/chat/completions"
-            resp = client.post(url, headers=self._headers(), json=payload)
-            if resp.status_code == 400 and "response_format" in resp.text.lower():
-                payload.pop("response_format", None)
+            resp = None
+            for attempt in range(1, 4):
                 resp = client.post(url, headers=self._headers(), json=payload)
-            if resp.status_code >= 400 and "temperature" in payload and any(
-                token in resp.text.lower()
-                for token in ("temperature", "top_p", "top_k", "deprecated", "unsupported parameter")
-            ):
-                for key in ("temperature", "top_p", "top_k"):
-                    payload.pop(key, None)
-                resp = client.post(url, headers=self._headers(), json=payload)
+                if resp.status_code == 400 and "response_format" in resp.text.lower():
+                    payload.pop("response_format", None)
+                    resp = client.post(url, headers=self._headers(), json=payload)
+                if resp.status_code >= 400 and "temperature" in payload and any(
+                    token in resp.text.lower()
+                    for token in ("temperature", "top_p", "top_k", "deprecated", "unsupported parameter")
+                ):
+                    for key in ("temperature", "top_p", "top_k"):
+                        payload.pop(key, None)
+                    resp = client.post(url, headers=self._headers(), json=payload)
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+                    time.sleep(attempt * 3)
+                    continue
+                break
             if resp.status_code >= 400:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text[:500]}")
             data = resp.json()
