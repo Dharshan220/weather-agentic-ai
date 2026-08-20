@@ -19,6 +19,7 @@ import app.agents.risk_detection
 import app.agents.recommendations
 import app.tools.weather
 import app.tools.email
+import app.tools.llm
 from app.config import get_settings, SEVERITY_LEVELS
 from app.models import Base, Location
 
@@ -307,23 +308,106 @@ class WeatherClientErrorTest(unittest.TestCase):
             tools.weather.WeatherClient().fetch_forecast(13.08, 80.27)
 
 
+class LLMClientTest(unittest.TestCase):
+    def _make_settings(self, provider):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            llm_provider=provider,
+            llm_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            llm_api_key="test-key",
+            llm_model="gemini-3.6-flash",
+            llm_temperature=0.2,
+            llm_timeout_seconds=5,
+        )
+
+    class FakeResponse:
+        def __init__(self, status_code, text, payload=None):
+            self.status_code = status_code
+            self.text = text
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def _run_chat(self, provider, responses, captures):
+        calls = []
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def post(self, url, headers=None, json=None):
+                calls.append(dict(json))
+                captures["calls"] = calls
+                return responses.pop(0)
+
+        with mock.patch.object(tools.llm.httpx, "Client", return_value=FakeClient()), mock.patch.object(
+            tools.llm, "get_settings", return_value=self._make_settings(provider)
+        ):
+            return tools.llm.LLMClient().chat([{"role": "user", "content": "hi"}])
+
+    def test_google_provider_omits_temperature(self):
+        captures = {}
+        out = self._run_chat(
+            "google",
+            [self.FakeResponse(200, "ok", {"choices": [{"message": {"content": '{"summary":"x"}'}}]})],
+            captures,
+        )
+        self.assertNotIn("temperature", captures["calls"][0])
+        self.assertIn('{"summary":"x"}', out)
+
+    def test_groq_provider_keeps_temperature(self):
+        captures = {}
+        self._run_chat(
+            "groq",
+            [self.FakeResponse(200, "ok", {"choices": [{"message": {"content": "ok"}}]})],
+            captures,
+        )
+        self.assertEqual(captures["calls"][0]["temperature"], 0.2)
+
+    def test_400_temperature_error_retries_without_temperature(self):
+        captures = {}
+        out = self._run_chat(
+            "groq",
+            [
+                self.FakeResponse(400, "Invalid value for 'temperature': unsupported parameter"),
+                self.FakeResponse(200, "ok", {"choices": [{"message": {"content": "ok"}}]}),
+            ],
+            captures,
+        )
+        self.assertIn("temperature", captures["calls"][0])
+        self.assertNotIn("temperature", captures["calls"][1])
+        self.assertEqual(out, "ok")
+
+    def test_400_unrelated_error_raises_llm_error(self):
+        captures = {}
+        with self.assertRaises(tools.llm.LLMError):
+            self._run_chat(
+                "groq",
+                [self.FakeResponse(400, "some other invalid argument")],
+                captures,
+            )
+        self.assertEqual(len(captures["calls"]), 1)
+
+
 class DailySummaryTest(unittest.TestCase):
-    """Exercise run_daily_summary against the app's configured database."""
+    """Exercise run_daily_summary against an isolated temp database."""
 
     def setUp(self):
-        from app.database import SessionLocal, init_db
-
-        init_db()
-        self.Session = SessionLocal
-        with self.Session() as db:
-            db.query(orchestrator.models.ForecastSnapshot).delete()
-            db.query(orchestrator.models.AnalysisResult).delete()
-            db.query(orchestrator.models.RiskEvent).delete()
-            db.query(orchestrator.models.Recommendation).delete()
-            db.query(orchestrator.models.AlertLog).delete()
-            db.query(orchestrator.models.AgentRun).delete()
-            db.query(orchestrator.models.Location).delete()
-            db.commit()
+        self.tmp = tempfile.mkdtemp()
+        engine = create_engine(
+            f"sqlite:///{os.path.join(self.tmp, 'test.db')}",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(engine)
+        self.Session = sessionmaker(bind=engine, autoflush=False)
+        self.patcher = mock.patch("app.database.SessionLocal", self.Session)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
 
     def _seed(self, raw_json, summary_json="{}"):
         with self.Session() as db:

@@ -77,23 +77,25 @@ class LLMClient:
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature,
         }
+        s = get_settings()
+        if s.llm_provider.lower() not in ("google", "gemini"):
+            payload["temperature"] = self.temperature
         if json_mode and self.api_key and self.base_url.endswith("/openai/v1") and "groq" not in self.base_url:
             payload["response_format"] = {"type": "json_object"}
         with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(
-                f"{self.base_url}/chat/completions",
-                headers=self._headers(),
-                json=payload,
-            )
+            url = f"{self.base_url}/chat/completions"
+            resp = client.post(url, headers=self._headers(), json=payload)
             if resp.status_code == 400 and "response_format" in resp.text.lower():
                 payload.pop("response_format", None)
-                resp = client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self._headers(),
-                    json=payload,
-                )
+                resp = client.post(url, headers=self._headers(), json=payload)
+            if resp.status_code >= 400 and "temperature" in payload and any(
+                token in resp.text.lower()
+                for token in ("temperature", "top_p", "top_k", "deprecated", "unsupported parameter")
+            ):
+                for key in ("temperature", "top_p", "top_k"):
+                    payload.pop(key, None)
+                resp = client.post(url, headers=self._headers(), json=payload)
             if resp.status_code >= 400:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text[:500]}")
             data = resp.json()
