@@ -314,10 +314,10 @@ def run_daily_summary(triggered_by: str = "daily") -> None:
                 .filter(models.Recommendation.run_id == run.id)
                 .all()
             )
-            current = _json(snap.summary_json) if snap else None
-            if current:
+            current = None
+            if snap and snap.summary_json:
                 try:
-                    current = json.loads(current)
+                    current = json.loads(snap.summary_json)
                 except Exception:
                     current = None
             sections.append(
