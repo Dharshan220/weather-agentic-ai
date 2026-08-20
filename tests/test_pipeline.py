@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -236,6 +237,170 @@ class OrchestratorTest(unittest.TestCase):
         )
         self.assertEqual(alert.status, "skipped")
         self.assertIn("threshold", alert.reason.lower())
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, payload=None, text=None):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text if text is not None else (json.dumps(payload) if payload is not None else "")
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("response body is not JSON")
+        return self._payload
+
+
+class FakeHTTPXClient:
+    def __init__(self, response):
+        self._response = response
+
+    def get(self, *args, **kwargs):
+        return self._response
+
+    def close(self):
+        pass
+
+
+class WeatherClientErrorTest(unittest.TestCase):
+    def _client(self, response):
+        return tools.weather.WeatherClient()
+
+    def _patch(self, response):
+        return mock.patch.object(
+            tools.weather.httpx, "Client", return_value=FakeHTTPXClient(response)
+        )
+
+    def test_valid_payload_builds_forecast(self):
+        hours = [f"2026-08-20T{h:02d}:00" for h in range(24)]
+        payload = {
+            "current": {"time": "2026-08-20T10:00", "temperature_2m": 32.0},
+            "hourly": {
+                "time": hours * 2,
+                "temperature_2m": [30.0] * 48,
+                "precipitation": [0.0] * 48,
+                "precipitation_probability": [0] * 48,
+                "wind_speed_10m": [10.0] * 48,
+                "weather_code": [3] * 48,
+            },
+        }
+        with self._patch(FakeResponse(200, payload)):
+            out = tools.weather.WeatherClient().fetch_forecast(13.08, 80.27)
+        self.assertEqual(out["current"]["temperature"], 32.0)
+        self.assertEqual(out["source"], "Open-Meteo")
+
+    def test_http_error_raises_weather_api_error(self):
+        with self._patch(FakeResponse(500, text="boom")), self.assertRaises(tools.weather.WeatherAPIError):
+            tools.weather.WeatherClient().fetch_forecast(13.08, 80.27)
+
+    def test_api_error_payload_raises_weather_api_error(self):
+        payload = {"error": True, "reason": "Latitude must be in range [-90, 90]."}
+        with self._patch(FakeResponse(200, payload)), self.assertRaises(tools.weather.WeatherAPIError):
+            tools.weather.WeatherClient().fetch_forecast(999, 80.27)
+
+    def test_non_json_body_raises_weather_api_error(self):
+        with self._patch(FakeResponse(200, text="<html>gateway error</html>")), self.assertRaises(tools.weather.WeatherAPIError):
+            tools.weather.WeatherClient().fetch_forecast(13.08, 80.27)
+
+    def test_non_dict_json_raises_weather_api_error(self):
+        with self._patch(FakeResponse(200, payload=["not", "a", "dict"])), self.assertRaises(tools.weather.WeatherAPIError):
+            tools.weather.WeatherClient().fetch_forecast(13.08, 80.27)
+
+
+class DailySummaryTest(unittest.TestCase):
+    """Exercise run_daily_summary against the app's configured database."""
+
+    def setUp(self):
+        from app.database import SessionLocal, init_db
+
+        init_db()
+        self.Session = SessionLocal
+        with self.Session() as db:
+            db.query(orchestrator.models.ForecastSnapshot).delete()
+            db.query(orchestrator.models.AnalysisResult).delete()
+            db.query(orchestrator.models.RiskEvent).delete()
+            db.query(orchestrator.models.Recommendation).delete()
+            db.query(orchestrator.models.AlertLog).delete()
+            db.query(orchestrator.models.AgentRun).delete()
+            db.query(orchestrator.models.Location).delete()
+            db.commit()
+
+    def _seed(self, raw_json, summary_json="{}"):
+        with self.Session() as db:
+            loc = Location(name="TestCity", lat=13.0, lon=80.0)
+            db.add(loc)
+            db.flush()
+            run = orchestrator.models.AgentRun(location_id=loc.id, status="completed")
+            db.add(run)
+            db.flush()
+            db.add(
+                orchestrator.models.ForecastSnapshot(
+                    location_id=loc.id, raw_json=raw_json, summary_json=summary_json
+                )
+            )
+            db.add(
+                orchestrator.models.AnalysisResult(
+                    run_id=run.id, location_id=loc.id, summary="Warm and humid.", source="ai"
+                )
+            )
+            db.commit()
+            return run.id, loc.id
+
+    def _run_summary(self, run_id, loc_id):
+        fake_run = mock.Mock(id=run_id, location_id=loc_id)
+        with mock.patch.object(orchestrator, "run_location", return_value=fake_run), mock.patch.object(
+            tools.email,
+            "send_email",
+            return_value={"status": "sent", "reason": "ok", "to": "x@y.z"},
+        ) as send:
+            orchestrator.run_daily_summary("daily")
+        return send
+
+    def test_valid_snapshot_includes_now_line(self):
+        payload = {
+            "current": {
+                "weather_text": "Overcast",
+                "temperature": 32.0,
+                "wind_speed": 18.0,
+                "humidity": 80,
+            },
+            "summary": {"max_temp": {"value": 33.0}},
+            "source": "Open-Meteo",
+        }
+        run_id, loc_id = self._seed(json.dumps(payload))
+        send = self._run_summary(run_id, loc_id)
+        self.assertTrue(send.called)
+        self.assertIn("Now: Overcast", send.call_args.args[1])
+        with self.Session() as db:
+            log = db.query(orchestrator.models.AlertLog).filter_by(risk_type="daily_summary").one()
+            self.assertEqual(log.run_id, run_id)
+            self.assertEqual(log.location_id, loc_id)
+            self.assertEqual(log.status, "sent")
+
+    def test_error_message_string_raw_json_does_not_crash(self):
+        run_id, loc_id = self._seed(json.dumps("Open-Meteo error 500: service unavailable"))
+        send = self._run_summary(run_id, loc_id)
+        self.assertTrue(send.called)
+        self.assertNotIn("Now:", send.call_args.args[1])
+
+    def test_empty_raw_json_does_not_crash(self):
+        run_id, loc_id = self._seed("")
+        send = self._run_summary(run_id, loc_id)
+        self.assertTrue(send.called)
+        self.assertNotIn("Now:", send.call_args.args[1])
+
+    def test_string_current_value_does_not_crash(self):
+        payload = {"current": "unexpected string payload", "summary": {}}
+        run_id, loc_id = self._seed(json.dumps(payload))
+        send = self._run_summary(run_id, loc_id)
+        self.assertTrue(send.called)
+        self.assertNotIn("Now:", send.call_args.args[1])
+
+    def test_invalid_json_raw_json_does_not_crash(self):
+        run_id, loc_id = self._seed("{not valid json")
+        send = self._run_summary(run_id, loc_id)
+        self.assertTrue(send.called)
+        self.assertNotIn("Now:", send.call_args.args[1])
 
 
 if __name__ == "__main__":

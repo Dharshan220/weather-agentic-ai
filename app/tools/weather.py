@@ -7,6 +7,10 @@ import httpx
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
+
+class WeatherAPIError(Exception):
+    """Raised when the weather provider returns an error or an unexpected payload."""
+
 WMO_CODES = {
     0: "Clear sky",
     1: "Mainly clear",
@@ -86,8 +90,24 @@ class WeatherClient:
             "timezone": "auto",
         }
         resp = self._client.get(OPEN_METEO_URL, params=params)
-        resp.raise_for_status()
-        return self._build_payload(resp.json())
+        if resp.status_code >= 400:
+            raise WeatherAPIError(
+                f"Open-Meteo error {resp.status_code}: {resp.text[:300]}"
+            )
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise WeatherAPIError(
+                f"Open-Meteo returned non-JSON response: {resp.text[:300]}"
+            ) from e
+        if not isinstance(data, dict):
+            raise WeatherAPIError(
+                f"Open-Meteo returned unexpected payload type: {type(data).__name__}"
+            )
+        if data.get("error"):
+            reason = data.get("reason") or data.get("message") or repr(data)[:300]
+            raise WeatherAPIError(f"Open-Meteo API error: {reason}")
+        return self._build_payload(data)
 
     def _build_payload(self, data: Dict) -> Dict:
         current = data.get("current", {})

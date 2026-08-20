@@ -319,10 +319,11 @@ def run_daily_summary(triggered_by: str = "daily") -> None:
             if snap and snap.raw_json:
                 try:
                     parsed = json.loads(snap.raw_json)
-                except Exception:
+                except (TypeError, ValueError):
                     parsed = None
                 if isinstance(parsed, dict):
-                    current = parsed.get("current")
+                    cur = parsed.get("current")
+                    current = cur if isinstance(cur, dict) else None
             sections.append(
                 {
                     "location": loc.name,

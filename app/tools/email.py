@@ -75,9 +75,10 @@ def build_daily_summary_email(sections: list, model_label: str) -> Dict[str, str
         text_lines += [f"📍 {name}", "-" * 30]
         html_blocks.append(f'<h3>📍 {name}</h3>')
         if s.get("current"):
-            c = s["current"]
-            text_lines.append(f"Now: {c.get('weather_text')}, {c.get('temperature')}°C, wind {c.get('wind_speed')} km/h, humidity {c.get('humidity')}%")
-            html_blocks.append(f'<p>Now: <b>{c.get("weather_text")}</b>, {c.get("temperature")}°C, wind {c.get("wind_speed")} km/h, humidity {c.get("humidity")}%</p>')
+            c = s["current"] if isinstance(s["current"], dict) else None
+            if c:
+                text_lines.append(f"Now: {c.get('weather_text')}, {c.get('temperature')}°C, wind {c.get('wind_speed')} km/h, humidity {c.get('humidity')}%")
+                html_blocks.append(f'<p>Now: <b>{c.get("weather_text")}</b>, {c.get("temperature")}°C, wind {c.get("wind_speed")} km/h, humidity {c.get("humidity")}%</p>')
         if s.get("analysis"):
             text_lines += ["", "AI Analysis:", s["analysis"]]
             html_blocks.append(f'<p><em>AI analysis:</em> {s["analysis"]}</p>')
